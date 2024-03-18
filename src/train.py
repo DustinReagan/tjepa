@@ -41,7 +41,7 @@ from src.utils.logging import (
     grad_logger,
     AverageMeter)
 from src.utils.tensors import repeat_interleave_batch
-from src.datasets.timeseries import make_timeseries
+from src.datasets.candles import make_timeseries
 
 from src.helper import (
     load_checkpoint,
@@ -95,6 +95,7 @@ def main(args, resume_preempt=False):
     pin_mem = args['data']['pin_mem']
     num_workers = args['data']['num_workers']
     crop_size = args['data']['crop_size']
+    num_channels = args['data']['num_channels']
     # --
 
     # -- MASK
@@ -161,6 +162,7 @@ def main(args, resume_preempt=False):
     # -- init model
     encoder, predictor = init_model(
         device=device,
+        num_channels=num_channels,
         patch_size=patch_size,
         crop_size=crop_size,
         pred_depth=pred_depth,
@@ -305,7 +307,6 @@ def main(args, resume_preempt=False):
                     return loss
 
                 if use_bfloat16:
-                    print("DEVICE: ", torch.get_device())
                     # Step 1. Forward
                     with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16):
                         h = forward_target()

@@ -68,14 +68,15 @@ def load_checkpoint(
 def init_model(
     device,
     patch_size=16,
+    num_channels=5,
     model_name='vit_base',
     crop_size=224,
     pred_depth=6,
     pred_emb_dim=384
 ):
-    print(vit.__dict__['vit_predictor'])
     encoder = vit.__dict__[model_name](
         length=crop_size,
+        in_chans=num_channels,
         patch_size=patch_size)
     predictor = vit.__dict__['vit_predictor'](
         num_patches=encoder.patch_embed.num_patches,

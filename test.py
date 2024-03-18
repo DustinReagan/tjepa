@@ -82,8 +82,8 @@ def main(args, resume_preempt=False):
     for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
         print('itr:', itr)
         print('udata shape:', udata.shape)
-        print(len(masks_enc))
-        print(len(masks_pred))
+        print(len(masks_enc), masks_enc[0][0])
+        print(len(masks_pred), masks_pred[0].shape, masks_pred[0][0])
         break
 
 

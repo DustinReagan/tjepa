@@ -3,8 +3,9 @@ data:
   num_workers: 4
   crop_size: 448
   pin_mem: true
+  num_channels: 5
 logging:
-  folder: logs/sin/
+  folder: logs/btc/
   write_tag: jepa
 mask:
   allow_overlap: false
