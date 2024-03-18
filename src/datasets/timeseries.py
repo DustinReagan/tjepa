@@ -52,7 +52,7 @@ def make_timeseries(
     return dataset, data_loader, dist_sampler
 
 class SinDataSet(Dataset):
-    def __init__(self, num_samples=1000, sequence_length=448, num_channels=1, freq_range=(1, 10), amp_range=(0.5, 5.5), random_state=None, transform: Optional[Callable] = None, training=True):
+    def __init__(self, num_samples=100000, sequence_length=448, num_channels=1, freq_range=(1, 1000), amp_range=(0.5, 100), random_state=None, transform: Optional[Callable] = None, training=True):
         """
         Initializes the dataset with parameters for generating sin curves, potentially across multiple channels.
         :param num_samples: Number of samples in the dataset.

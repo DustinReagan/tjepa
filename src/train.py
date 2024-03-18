@@ -269,11 +269,9 @@ def main(args, resume_preempt=False):
         time_meter = AverageMeter()
 
         for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
-            print('udata shape:', udata.shape)
             def load_imgs():
                 # -- unsupervised imgs
                 imgs = udata.to(device, non_blocking=True)
-                print('imgs shape:', imgs.shape)
                 masks_1 = [u.to(device, non_blocking=True) for u in masks_enc]
                 masks_2 = [u.to(device, non_blocking=True) for u in masks_pred]
                 return (imgs, masks_1, masks_2)
