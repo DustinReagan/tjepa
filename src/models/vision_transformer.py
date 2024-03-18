@@ -238,14 +238,14 @@ class VisionTransformerPredictor(nn.Module):
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_embed_dim))
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
-        
+
         # 1D Positional embeddings
         self.predictor_pos_embed = nn.Parameter(torch.zeros(1, num_patches, predictor_embed_dim),
                                                 requires_grad=False)
         # Initialize positional embeddings for 1D
         pos_embed_init = get_1d_sincos_pos_embed(predictor_embed_dim, num_patches, cls_token=False)
         self.predictor_pos_embed.data.copy_(torch.from_numpy(pos_embed_init).float().unsqueeze(0))
-        
+
         self.predictor_blocks = nn.ModuleList([
             Block(
                 dim=predictor_embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
@@ -253,7 +253,7 @@ class VisionTransformerPredictor(nn.Module):
             for i in range(depth)])
         self.predictor_norm = norm_layer(predictor_embed_dim)
         self.predictor_proj = nn.Linear(predictor_embed_dim, embed_dim, bias=True)
-        
+
         self.init_std = init_std
         trunc_normal_(self.mask_token, std=self.init_std)
         self.apply(self._init_weights)
@@ -268,32 +268,47 @@ class VisionTransformerPredictor(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x, masks_x, masks):
-        assert (masks is not None) and (masks_x is not None), "Cannot run predictor without mask indices"
-        
-        B = x.shape[0]  # Batch size
+        assert (masks is not None) and (masks_x is not None), 'Cannot run predictor without mask indices'
 
-        # Map from encoder dimension to predictor dimension
+        if not isinstance(masks_x, list):
+            masks_x = [masks_x]
+
+        if not isinstance(masks, list):
+            masks = [masks]
+
+        # -- Batch Size
+        B = len(x) // len(masks_x)
+
+        # -- map from encoder-dim to pedictor-dim
         x = self.predictor_embed(x)
 
-        # Add positional embedding to x tokens
-        x += self.predictor_pos_embed.expand_as(x)
-        
-        # Handle masked positions
-        # Note: This simplification assumes masks_x and masks directly apply to 1D sequences.
-        # Create mask tokens
-        masked_tokens = self.mask_token.expand(B, len(masks), -1)
-        # Concatenate masked tokens to the sequence
-        x = torch.cat((x, masked_tokens), dim=1)
-        
-        # Forward pass through blocks
+        # -- add positional embedding to x tokens
+        x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
+        x += apply_masks(x_pos_embed, masks_x)
+
+        _, N_ctxt, D = x.shape
+
+        # -- concat mask tokens to x
+        pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
+        pos_embs = apply_masks(pos_embs, masks)
+        pos_embs = repeat_interleave_batch(pos_embs, B, repeat=len(masks_x))
+        # --
+        pred_tokens = self.mask_token.repeat(pos_embs.size(0), pos_embs.size(1), 1)
+        # --
+        pred_tokens += pos_embs
+        x = x.repeat(len(masks), 1, 1)
+        x = torch.cat([x, pred_tokens], dim=1)
+
+        # -- fwd prop
         for blk in self.predictor_blocks:
             x = blk(x)
-        
-        # Normalize
         x = self.predictor_norm(x)
 
-        # Return predictions for masked tokens only
-        return self.predictor_proj(x[:, -len(masks):])
+        # -- return preds for mask tokens
+        x = x[:, N_ctxt:]
+        x = self.predictor_proj(x)
+
+        return x
 
 class VisionTransformer(nn.Module):
     """Vision Transformer adapted for 1D inputs."""
@@ -316,14 +331,15 @@ class VisionTransformer(nn.Module):
     ):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim
+        self.num_heads = num_heads
 
         # Patch embedding for 1D
         self.patch_embed = PatchEmbed(length=length, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
         # Positional embedding for 1D
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # +1 for cls_token
-        pos_embed_init = get_1d_sincos_pos_embed(embed_dim, num_patches, cls_token=True)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim), requires_grad=False)  # +1 for cls_token
+        pos_embed_init = get_1d_sincos_pos_embed(embed_dim, num_patches, cls_token=False)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed_init).float())
 
         # Dropout
@@ -351,23 +367,46 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x, masks=None):
-        # Add a class token to the input sequence
-        B, N, _ = x.shape
-        cls_tokens = self.pos_embed[:, :1, :].expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        
-        # Add positional embeddings
-        x += self.pos_embed
-        x = self.pos_drop(x)
+        if masks is not None:
+            if not isinstance(masks, list):
+                masks = [masks]
 
-        # Apply transformer blocks
-        for blk in self.blocks:
+        # -- patchify x
+        x = self.patch_embed(x)
+        B, N, D = x.shape
+
+        # -- add positional embedding to x
+        pos_embed = self.interpolate_pos_encoding(x, self.pos_embed)
+        x = x + pos_embed
+
+        # -- mask x
+        if masks is not None:
+            x = apply_masks(x, masks)
+
+        # -- fwd prop
+        for i, blk in enumerate(self.blocks):
             x = blk(x)
 
-        # Normalize
-        x = self.norm(x)
+        if self.norm is not None:
+            x = self.norm(x)
 
         return x
+
+    def interpolate_pos_encoding(self, x, pos_embed):
+        npatch = x.shape[1] - 1
+        N = pos_embed.shape[1] - 1
+        if npatch == N:
+            return pos_embed
+        class_emb = pos_embed[:, 0]
+        pos_embed = pos_embed[:, 1:]
+        dim = x.shape[-1]
+        pos_embed = nn.functional.interpolate(
+            pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
+            scale_factor=math.sqrt(npatch / N),
+            mode='bicubic',
+        )
+        pos_embed = pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        return torch.cat((class_emb.unsqueeze(0), pos_embed), dim=1)
 
 
 def vit_predictor(**kwargs):

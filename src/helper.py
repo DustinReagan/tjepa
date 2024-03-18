@@ -73,8 +73,9 @@ def init_model(
     pred_depth=6,
     pred_emb_dim=384
 ):
+    print(vit.__dict__['vit_predictor'])
     encoder = vit.__dict__[model_name](
-        img_size=[crop_size],
+        length=crop_size,
         patch_size=patch_size)
     predictor = vit.__dict__['vit_predictor'](
         num_patches=encoder.patch_embed.num_patches,

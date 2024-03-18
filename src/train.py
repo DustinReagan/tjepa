@@ -41,7 +41,7 @@ from src.utils.logging import (
     grad_logger,
     AverageMeter)
 from src.utils.tensors import repeat_interleave_batch
-from src.datasets.imagenet1k import make_imagenet1k
+from src.datasets.timeseries import make_timeseries
 
 from src.helper import (
     load_checkpoint,
@@ -84,19 +84,17 @@ def main(args, resume_preempt=False):
         device = torch.device('cuda:0')
         torch.cuda.set_device(device)
 
+
+
+
     # -- DATA
-    use_gaussian_blur = args['data']['use_gaussian_blur']
-    use_horizontal_flip = args['data']['use_horizontal_flip']
-    use_color_distortion = args['data']['use_color_distortion']
-    color_jitter = args['data']['color_jitter_strength']
+
+
     # --
     batch_size = args['data']['batch_size']
     pin_mem = args['data']['pin_mem']
     num_workers = args['data']['num_workers']
-    root_path = args['data']['root_path']
-    image_folder = args['data']['image_folder']
     crop_size = args['data']['crop_size']
-    crop_scale = args['data']['crop_scale']
     # --
 
     # -- MASK
@@ -107,7 +105,6 @@ def main(args, resume_preempt=False):
     enc_mask_scale = args['mask']['enc_mask_scale']  # scale of context blocks
     num_pred_masks = args['mask']['num_pred_masks']  # number of target blocks
     pred_mask_scale = args['mask']['pred_mask_scale']  # scale of target blocks
-    aspect_ratio = args['mask']['aspect_ratio']  # aspect ratio of target blocks
     # --
 
     # -- OPTIMIZATION
@@ -137,6 +134,9 @@ def main(args, resume_preempt=False):
 
     # -- init torch distributed backend
     world_size, rank = init_distributed()
+    print('RANK:', rank)
+    print('WORLD_SIZE:', world_size)
+
     logger.info(f'Initialized (rank/world-size) {rank}/{world_size}')
     if rank > 0:
         logger.setLevel(logging.ERROR)
@@ -170,26 +170,19 @@ def main(args, resume_preempt=False):
 
     # -- make data transforms
     mask_collator = MBMaskCollator(
-        input_size=crop_size,
+        input_length=crop_size,
         patch_size=patch_size,
         pred_mask_scale=pred_mask_scale,
         enc_mask_scale=enc_mask_scale,
-        aspect_ratio=aspect_ratio,
         nenc=num_enc_masks,
         npred=num_pred_masks,
         allow_overlap=allow_overlap,
         min_keep=min_keep)
 
-    transform = make_transforms(
-        crop_size=crop_size,
-        crop_scale=crop_scale,
-        gaussian_blur=use_gaussian_blur,
-        horizontal_flip=use_horizontal_flip,
-        color_distortion=use_color_distortion,
-        color_jitter=color_jitter)
+    transform = make_transforms()
 
     # -- init data-loaders/samplers
-    _, unsupervised_loader, unsupervised_sampler = make_imagenet1k(
+    _, unsupervised_loader, unsupervised_sampler = make_timeseries(
             transform=transform,
             batch_size=batch_size,
             collator=mask_collator,
@@ -198,9 +191,6 @@ def main(args, resume_preempt=False):
             num_workers=num_workers,
             world_size=world_size,
             rank=rank,
-            root_path=root_path,
-            image_folder=image_folder,
-            copy_data=copy_data,
             drop_last=True)
     ipe = len(unsupervised_loader)
 
@@ -218,9 +208,12 @@ def main(args, resume_preempt=False):
         num_epochs=num_epochs,
         ipe_scale=ipe_scale,
         use_bfloat16=use_bfloat16)
-    encoder = DistributedDataParallel(encoder, static_graph=True)
-    predictor = DistributedDataParallel(predictor, static_graph=True)
-    target_encoder = DistributedDataParallel(target_encoder)
+
+    if world_size != 1:
+        encoder = DistributedDataParallel(encoder, static_graph=True)
+        predictor = DistributedDataParallel(predictor, static_graph=True)
+        target_encoder = DistributedDataParallel(target_encoder)
+
     for p in target_encoder.parameters():
         p.requires_grad = False
 
@@ -276,10 +269,11 @@ def main(args, resume_preempt=False):
         time_meter = AverageMeter()
 
         for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
-
+            print('udata shape:', udata.shape)
             def load_imgs():
                 # -- unsupervised imgs
-                imgs = udata[0].to(device, non_blocking=True)
+                imgs = udata.to(device, non_blocking=True)
+                print('imgs shape:', imgs.shape)
                 masks_1 = [u.to(device, non_blocking=True) for u in masks_enc]
                 masks_2 = [u.to(device, non_blocking=True) for u in masks_pred]
                 return (imgs, masks_1, masks_2)
@@ -312,18 +306,22 @@ def main(args, resume_preempt=False):
                     loss = AllReduce.apply(loss)
                     return loss
 
-                # Step 1. Forward
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16):
-                    h = forward_target()
-                    z = forward_context()
-                    loss = loss_fn(z, h)
-
-                #  Step 2. Backward & step
                 if use_bfloat16:
+                    print("DEVICE: ", torch.get_device())
+                    # Step 1. Forward
+                    with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16):
+                        h = forward_target()
+                        z = forward_context()
+                        loss = loss_fn(z, h)
+
+                    #  Step 2. Backward & step
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                 else:
+                    h = forward_target()
+                    z = forward_context()
+                    loss = loss_fn(z, h)
                     loss.backward()
                     optimizer.step()
                 grad_stats = grad_logger(encoder.named_parameters())
