@@ -33,7 +33,7 @@ def make_timeseries(
     training=True,
     drop_last=True,
 ):
-    dataset = CandleDataSet( 'data/binanceus/BTC_USDT-1d.feather', training=training, transform=transform)
+    dataset = CandleDataSet( 'data/binanceus/', freq="1d", training=training, transform=transform)
     logger.info('TimeSeries dataset created')
     dist_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset=dataset,
@@ -53,49 +53,61 @@ def make_timeseries(
     return dataset, data_loader, dist_sampler
 
 class CandleDataSet(Dataset):
-    def __init__(self, file_path: str, sequence_length=448, columns=['open', 'close', 'high', 'low', 'volume'], random_state=None, transform: Optional[Callable] = None, training=True):
+    def __init__(self, data_dir: str, freq="1d", sequence_length=448, columns=['open', 'close', 'high', 'low', 'volume'], random_state=42, transform: Optional[Callable] = None, training=True):
         """
-        Initializes the dataset to load financial data and generate sequences of specified length.
-        :param file_path: Path to the data file.
+        Initializes the dataset to load financial data from multiple files and generate sequences of specified length.
+        Each file represents a distinct stock or cryptocurrency.
+        :param data_dir: Directory containing data files.
+        :param freq: Frequency of the data, used to filter files by naming convention.
         :param sequence_length: Length of each sequence.
         :param columns: List of columns to include in the dataset.
         :param random_state: Seed for the random number generator.
         :param transform: Optional transformation to apply to each sequence.
         :param training: Flag to determine whether to apply transforms (if any).
         """
-        df = pd.read_feather(file_path)
-        self.data = df[columns].to_numpy()
-
         self.sequence_length = sequence_length
-        self.num_channels = len(columns)
+        self.columns = columns
         self.random_state = np.random.RandomState(random_state)
         self.transform = transform
         self.training = training
+        self.sequences = []  # To store preloaded sequences
 
-        # Ensure that there is enough data for at least one sequence
-        if len(df) < sequence_length:
-            raise ValueError("Data length is shorter than the requested sequence length.")
+        # Find all relevant data files
+        self.data_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(f'-{freq}.feather')]
+        if not self.data_files:
+            raise ValueError("No data files found in the specified directory.")
 
-        # Calculate number of samples: each step moves one time point forward
-        self.num_samples = len(df) - sequence_length + 1
+        # Load data from files and preprocess
+        self.preprocess_data()
+
+    def preprocess_data(self):
+        """
+        Preprocesses data from multiple files by loading it into memory,
+        ensuring sequences are contained within a single file.
+        """
+        for file_path in self.data_files:
+            df = pd.read_feather(file_path)
+            if len(df) < self.sequence_length:
+                # Skip files that do not have enough data for at least one sequence
+                continue
+
+            data = df[self.columns].to_numpy()
+            # Generate all possible sequences for this file and add them to the list
+            for start_idx in range(len(df) - self.sequence_length + 1):
+                end_idx = start_idx + self.sequence_length
+                self.sequences.append(data[start_idx:end_idx])
 
     def __len__(self):
-        """
-        Returns the number of samples in the dataset.
-        """
-        return self.num_samples
+        return len(self.sequences)
 
     def __getitem__(self, idx):
         """
-        Generates a single sample of the dataset, consisting of a sequence of data.
+        Generates a single sample of the dataset, consisting of a preloaded sequence of data.
         """
-        # Extract the sequence from the data
-        start_idx = idx
-        end_idx = idx + self.sequence_length
-        data_sequence = self.data[start_idx:end_idx, :]
+        data_sequence = self.sequences[idx]
 
-        # Convert to PyTorch tensor
-        data_tensor = torch.from_numpy(data_sequence).float().transpose(0, 1)  # Shape: [num_channels, sequence_length]
+        # Convert to PyTorch tensor and transpose to match expected shape [num_channels, sequence_length]
+        data_tensor = torch.from_numpy(data_sequence).float().transpose(0, 1)
 
         # Apply transforms if specified and in training mode
         if self.training and self.transform is not None:
