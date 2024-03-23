@@ -2,3 +2,5 @@
 *.swo
 __pycache__
 *.tar
+*.DS_Store
+*.vscode

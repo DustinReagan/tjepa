@@ -1,7 +1,10 @@
+import os
 import argparse
-from src.datasets.timeseries import make_timeseries
-from src.masks.multiblock import MaskCollator as MBMaskCollator
+from src.datasets.candles_classification import make_timeseries
 from src.transforms import make_transforms
+from src.models.linear_regressor import RegressorWithEncoder
+from src.helper import load_checkpoint, init_model
+import pytorch_lightning as pl
 import yaml
 
 parser = argparse.ArgumentParser()
@@ -13,9 +16,48 @@ parser.add_argument(
     '--devices', type=str, nargs='+', default=['cuda:0'],
     help='which devices to use on local machine')
 
+
+def load_model(args, device, checkpoint_path):
+
+    patch_size = args['mask']['patch_size']  # patch-size for model training
+    crop_size = args['data']['crop_size']
+    num_channels = args['data']['num_channels']
+    model_name = args['meta']['model_name']
+    pred_depth = args['meta']['pred_depth']
+    pred_emb_dim = args['meta']['pred_emb_dim']
+
+    # Initialize model
+    encoder, _ = init_model(
+        device=device,
+        patch_size=patch_size,
+        num_channels=num_channels,
+        model_name=model_name,
+        crop_size=crop_size,
+        pred_depth=pred_depth,
+        pred_emb_dim=pred_emb_dim,
+    )
+    encoder.to(device)
+
+    # Load checkpoint
+    _, _, target_encoder, _, _, _ = load_checkpoint(
+        device=device,
+        r_path=checkpoint_path,
+        encoder=encoder,
+        predictor=None,  # Assuming not needed for inference
+        target_encoder=encoder,  # Assuming not needed for inference
+        opt=None,  # Assuming not needed for inference
+        scaler=None)  # Assuming not needed for inference
+
+    # Lock weights
+    for param in encoder.parameters():
+        param.requires_grad = False
+
+    return target_encoder
+
 def main(args, resume_preempt=False):
     print(args)
     print(args.fname)
+    devices = args.devices
     # -- load script params
 
     with open(args.fname, 'r') as y_file:
@@ -29,7 +71,6 @@ def main(args, resume_preempt=False):
     # -- META
     use_bfloat16 = args['meta']['use_bfloat16']
     model_name = args['meta']['model_name']
-    load_model = args['meta']['load_checkpoint'] or resume_preempt
     r_file = args['meta']['read_checkpoint']
     copy_data = args['meta']['copy_data']
     pred_depth = args['meta']['pred_depth']
@@ -54,37 +95,41 @@ def main(args, resume_preempt=False):
     num_pred_masks = args['mask']['num_pred_masks']  # number of target blocks
     pred_mask_scale = args['mask']['pred_mask_scale']  # scale of target blocks
 
-    mask_collator = MBMaskCollator(
-        input_length=crop_size,
-        patch_size=patch_size,
-        pred_mask_scale=pred_mask_scale,
-        enc_mask_scale=enc_mask_scale,
-        nenc=num_enc_masks,
-        npred=num_pred_masks,
-        allow_overlap=allow_overlap,
-        min_keep=min_keep)
 
     transform = make_transforms()
 
     # -- init data-loaders/samplers
-    _, unsupervised_loader, unsupervised_sampler = make_timeseries(
+    dataset, loader, sampler = make_timeseries(
             transform=transform,
             batch_size=batch_size,
-            collator=mask_collator,
             pin_mem=pin_mem,
             training=True,
             num_workers=num_workers,
             world_size=1,
             rank=0,
             drop_last=True)
-    print(len(unsupervised_loader))
 
-    for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
-        print('itr:', itr)
-        print('udata shape:', udata.shape)
-        print(len(masks_enc), masks_enc[0][0])
-        print(len(masks_pred), masks_pred[0].shape, masks_pred[0][0])
-        break
+
+    folder = args['logging']['folder']
+    tag = args['logging']['write_tag']
+    latest_path = os.path.join(folder, f'{tag}-latest.pth.tar')
+
+    load_path = os.path.join(folder, r_file) if r_file is not None else latest_path
+
+    encoder = load_model(args, devices[0], load_path)
+    # Calculate input size dynamically or set it based on your data preprocessing
+    input_shape = dataset[0][0].shape
+    # add an additional dimension for the batch size
+    input_shape = (1,) + input_shape
+    print(input_shape)
+    model = RegressorWithEncoder(encoder=encoder, input_shape=input_shape, hidden_layers=[512], learning_rate=1e-4)
+
+
+    # Initialize a trainer
+    trainer = pl.Trainer(max_epochs=10)
+
+    # Train the model
+    trainer.fit(model, loader)
 
 
 if __name__ == "__main__":
