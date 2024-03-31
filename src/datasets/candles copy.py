@@ -56,69 +56,66 @@ def make_timeseries(
 class CandleDataSet(Dataset):
     def __init__(self, data_dir: str, freq="1d", sequence_length=448, columns=['open', 'close', 'high', 'low', 'volume'], random_state=42, transform: Optional[Callable] = None, training=True):
         """
-        Initializes the dataset for on-demand loading of financial data sequences.
+        Initializes the dataset to load financial data from multiple files and generate sequences of specified length.
         Each file represents a distinct stock or cryptocurrency.
+        :param data_dir: Directory containing data files.
+        :param freq: Frequency of the data, used to filter files by naming convention.
+        :param sequence_length: Length of each sequence.
+        :param columns: List of columns to include in the dataset.
+        :param random_state: Seed for the random number generator.
+        :param transform: Optional transformation to apply to each sequence.
+        :param training: Flag to determine whether to apply transforms (if any).
         """
         self.sequence_length = sequence_length
         self.columns = columns
+        self.random_state = np.random.RandomState(random_state)
         self.transform = transform
         self.training = training
-        self.data_files = []
-        self.file_lengths = []
-        self.total_sequences = 0
-        self.data_frames = []
+        self.sequences = []  # To store preloaded sequences
+
         # Find all relevant data files
-        files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(f'-{freq}.feather')]
-        if not files:
+        self.data_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(f'-{freq}.feather')]
+        if not self.data_files:
             raise ValueError("No data files found in the specified directory.")
-        
-        # Preprocess to calculate the number of sequences in each file
-        self.preprocess_data(files, random_state)
 
-    def preprocess_data(self, files, random_state):
-        """
-        Preprocesses data from multiple files without loading it into memory.
-        Calculates how many sequences each file can provide.
-        """
-        np.random.seed(random_state)
-        for file_path in files:
-            df_length = pd.read_feather(file_path, columns=[self.columns[0]]).shape[0]
-            if df_length >= self.sequence_length:
-                num_sequences = df_length - self.sequence_length + 1
-                #self.data_files.append(file_path)
-                self.file_lengths.append(num_sequences)
-                self.total_sequences += num_sequences
-                self.data_frames.append(pd.read_feather(file_path))
+        # Load data from files and preprocess
+        self.preprocess_data()
 
+    def preprocess_data(self):
+        """
+        Preprocesses data from multiple files by loading it into memory,
+        ensuring sequences are contained within a single file.
+        """
+        for file_path in self.data_files:
+            df = pd.read_feather(file_path)
+            if len(df) < self.sequence_length:
+                # Skip files that do not have enough data for at least one sequence
+                continue
+            
+
+            data = df[self.columns].to_numpy()
+            # Generate all possible sequences for this file and add them to the list
+            for start_idx in range(len(df) - self.sequence_length + 1):
+                end_idx = start_idx + self.sequence_length
+                self.sequences.append(data[start_idx:end_idx])
+            print(f'Loaded {file_path} with {len(self.sequences)} sequences')
     def __len__(self):
-        return self.total_sequences
+        return len(self.sequences)
 
     def __getitem__(self, idx):
         """
-        Lazily loads and generates a single sample of the dataset.
+        Generates a single sample of the dataset, consisting of a preloaded sequence of data.
         """
-        # Determine which file and where in the file this sequence is
-        file_idx, seq_idx = self.locate_sequence(idx)
-        
-        # Load the specific sequence
-        df = self.data_frames[file_idx]#pd.read_feather(self.data_files[file_idx])
-        data = df[self.columns].iloc[seq_idx:seq_idx+self.sequence_length].to_numpy()
-        
-        # Process the data as required
-        data_tensor = torch.from_numpy(data).float().transpose(0, 1)
-        if self.training and self.transform:
-            data_tensor = self.transform(data_tensor)
-        
-        return data_tensor
+        data_sequence = self.sequences[idx]
 
-    def locate_sequence(self, idx):
-        """
-        Finds which file and the index within the file a given sequence index corresponds to.
-        """
-        cumsum = np.cumsum(self.file_lengths)
-        file_idx = np.searchsorted(cumsum, idx+1)
-        seq_idx_in_file = idx - (cumsum[file_idx-1] if file_idx > 0 else 0)
-        return file_idx, seq_idx_in_file
+        # Convert to PyTorch tensor and transpose to match expected shape [num_channels, sequence_length]
+        data_tensor = torch.from_numpy(data_sequence).float().transpose(0, 1)
+
+        # Apply transforms if specified and in training mode
+        if self.training and self.transform is not None:
+            data_tensor = self.transform(data_tensor)
+
+        return data_tensor
 
 
 # Example usage

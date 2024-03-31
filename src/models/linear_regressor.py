@@ -5,24 +5,27 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 
-class OrdinalFlexibleClassifier(nn.Module):
+class FlexibleRegressor(nn.Module):
     def __init__(self, input_size: int, hidden_layers=None):
-        """
-        Initializes a flexible classifier for ordinal regression.
-
-        Parameters:
-        - input_size: The size of the input features.
-        - hidden_layers: None for a linear regressor, or a list of integers specifying the size of each hidden layer for an MLP.
-        """
-        super(OrdinalFlexibleClassifier, self).__init__()
-
+        super(FlexibleRegressor, self).__init__()
         if hidden_layers is None:
-            self.layers = nn.Sequential(nn.Linear(input_size, 1))
+            self.layers = nn.Sequential(
+                nn.Linear(input_size, 1),
+                #nn.Tanh()  # Add Tanh activation for the output layer
+            ) 
         else:
-            layers = [nn.Linear(input_size, hidden_layers[0]), nn.ReLU()]
+            layers = [nn.Linear(input_size, hidden_layers[0])]
+            print(f"Initializing first layer with input size {input_size} and output size {hidden_layers[0]}")
             for i in range(1, len(hidden_layers)):
-                layers.extend([nn.Linear(hidden_layers[i-1], hidden_layers[i]), nn.ReLU()])
-            layers.append(nn.Linear(hidden_layers[-1], 1))
+                layers.extend([
+                    nn.Linear(hidden_layers[i-1], hidden_layers[i]),
+                    nn.ReLU()  # Assuming ReLU activations for hidden layers
+                ])
+                print(f"Initializing layer {i} with input size {hidden_layers[i-1]} and output size {hidden_layers[i]}")
+            layers.extend([
+                nn.Linear(hidden_layers[-1], 1),
+                #nn.Tanh()  # Add Tanh activation for the output layer
+            ])
             self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -44,28 +47,61 @@ class RegressorWithEncoder(pl.LightningModule):
 
         # Infer the output size of the encoder
         self.encoder.eval()  # Ensure the encoder is in evaluation mode
-        dummy_input = torch.randn(input_shape)  # Adjust the shape based on encoder's expected input
+        # Ensure the dummy input is on the same device as the encoder
+        device = next(encoder.parameters()).device
+        dummy_input = torch.randn(input_shape, device=device)  # Adjust the shape based on encoder's expected input
         with torch.no_grad():
             dummy_output = self.encoder(dummy_input)
-        output_size = dummy_output.shape[1]
+        output_size = dummy_output.shape[-1]
+        
+        print("Dummy input shape:", dummy_input.shape)
+        print("Dummy output shape:", dummy_output.shape)
 
-        self.regression_head = OrdinalFlexibleClassifier(input_size=output_size, hidden_layers=hidden_layers)
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+
+        self.regression_head = FlexibleRegressor(input_size=output_size, hidden_layers=hidden_layers)
         self.learning_rate = learning_rate
 
         # Optionally, freeze the encoder
-        for param in self.encoder.parameters():
-            param.requires_grad = False
+        # for param in self.encoder.parameters():
+        #     param.requires_grad = False
 
     def forward(self, x):
-        embeddings = self.encoder(x)  # Get embeddings from encoder
-        return self.regression_head(embeddings)
+        embeddings = self.encoder(x)
+        # Ensure embeddings is not None and correctly shaped
+        
+        # encoder's output shape is [batch_size, seq_len, embedding_dim]
+        # and we want to average across the seq_len dimension.
+        # Transpose to [batch_size, embedding_dim, seq_len] for AdaptiveAvgPool1d
+        embeddings = embeddings.transpose(1, 2)
+
+        # Apply average pooling
+        pooled_embeddings = self.avg_pool(embeddings).squeeze(-1)  # Removing the last dimension
+
+        
+        
+        # Pass through the regression head
+        output = self.regression_head(pooled_embeddings)
+
+        # pass the last sequence through the regression head
+        #output = self.regression_head(embeddings[:, -1, :])
+
+        return output
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        y = y.float()  # Ensure y is a float tensor for MSE loss calculation
+        y_mean = y.float().mean()
+        y_std = y.float().std()
+        y_normalized = (y.float() - y_mean) / (y_std + 1e-6)  # Add a small epsilon to avoid division by zero
+
         y_pred = self(x)
-        loss = F.mse_loss(y_pred, y)
-        self.log('train_loss', loss)
+
+        # Depending on your downstream tasks or evaluation metrics,
+        # you might want to denormalize predictions or keep them normalized.
+        # Here, we proceed with normalized predictions for calculating MSE loss.
+
+        loss = F.mse_loss(y_pred, y_normalized)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def configure_optimizers(self):

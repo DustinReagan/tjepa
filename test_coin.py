@@ -2,11 +2,11 @@ import os
 import argparse
 #from datasets.candles_regression import make_timeseries
 #from src.datasets.timeseries import make_timeseries
-#from src.datasets.candles_coin_classification import make_timeseries
-from src.datasets.candles_classification import make_timeseries
+from src.datasets.candles_coin_classification import make_timeseries
+#from src.datasets.candles_classification import make_timeseries
 from src.transforms import make_transforms
 from src.models.linear_regressor import RegressorWithEncoder
-from src.models.linear_candle_classifier import ClassifierWithEncoder
+from src.models.linear_classifier import ClassifierWithEncoder
 from src.helper import load_checkpoint, init_model
 import pytorch_lightning as pl
 import yaml
@@ -68,7 +68,7 @@ def load_model(args, device, checkpoint_path):
     # for param in encoder.parameters():
     #     param.requires_grad = False
 
-    return target_encoder
+    return encoder
 
 def main(args):
     devices = args.devices
@@ -130,7 +130,7 @@ def main(args):
     # add an additional dimension for the batch size
     input_shape = (1,) + input_shape
     print(input_shape)
-    model = ClassifierWithEncoder(encoder=encoder, input_shape=input_shape, num_classes=train_dataset.get_num_classes(), hidden_layers=[256], learning_rate=1e-3)
+    model = ClassifierWithEncoder(encoder=encoder, input_shape=input_shape, num_classes=train_dataset.get_num_classes(), hidden_layers=None, learning_rate=1e-3)
     model.to(devices[0])
 
     # Initialize a trainer

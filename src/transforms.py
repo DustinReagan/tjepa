@@ -9,17 +9,21 @@ from logging import getLogger
 
 import torch
 import torch.nn as nn
+import math
+import torch.nn.functional as F
 
 _GLOBAL_SEED = 0
 
-def make_transforms(noise_level=0.1):
+def make_transforms(noise_level=0.05):
     """
     Create a sequence of transformations for multi-channel time-series data,
     including adding noise and normalization.
     """
     transform_list = [
-        AddNoiseToMultiChannelTimeSeries(noise_level=noise_level),
-        NormalizeMultiChannelTimeSeries()
+        
+        NormalizeMultiChannelTimeSeries(),
+        #AddNoiseToMultiChannelTimeSeries(noise_level=noise_level),
+        #GaussianBlur1D(),
     ]
     # Use torch.nn.Sequential to compose the transforms
     transform_sequence = torch.nn.Sequential(*transform_list)
@@ -53,3 +57,36 @@ class NormalizeMultiChannelTimeSeries(nn.Module):
             std = torch.std(channel)
             normalized_tensor[i, :] = (channel - mean) / std
         return normalized_tensor
+
+class GaussianBlur1D(nn.Module):
+    def __init__(self, p=0.5, min_rad=1, max_rad=3):
+        super(GaussianBlur1D, self).__init__()
+        self.p = p
+        self.min_rad = min_rad
+        self.max_rad = max_rad
+
+    def forward(self, x):
+        # Check probability to apply blur
+        if torch.rand(1) > self.p:
+            return x  # Return original tensor if not applying blur
+        
+        # Randomly choose a radius for the Gaussian kernel
+        rad = torch.randint(low=self.min_rad, high=self.max_rad + 1, size=(1,)).item()
+        kernel_size = 2 * rad + 1
+        
+        # Generate 1D Gaussian kernel
+        kernel = torch.arange(kernel_size).float() - rad
+        kernel = torch.exp(-0.5 * (kernel / rad).pow(2))
+        kernel /= kernel.sum()
+        
+        # Reshape kernel for convolution
+        kernel = kernel.view(1, 1, kernel_size).repeat(x.shape[0], 1, 1)
+        
+        # Apply padding to maintain sequence length
+        padding = rad
+        
+        # Convolve each channel independently
+        x_padded = F.pad(x, (padding, padding), mode='constant', value=0)
+        blurred_x = F.conv1d(x_padded.unsqueeze(1), kernel, groups=x.shape[0])
+        
+        return blurred_x.squeeze(1)

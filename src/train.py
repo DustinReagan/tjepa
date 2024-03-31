@@ -42,6 +42,7 @@ from src.utils.logging import (
     AverageMeter)
 from src.utils.tensors import repeat_interleave_batch
 from src.datasets.candles import make_timeseries
+#from src.datasets.timeseries import make_timeseries
 
 from src.helper import (
     load_checkpoint,
@@ -187,6 +188,7 @@ def main(args, resume_preempt=False):
     _, unsupervised_loader, unsupervised_sampler = make_timeseries(
             transform=transform,
             batch_size=batch_size,
+            sequence_length=crop_size,
             collator=mask_collator,
             pin_mem=pin_mem,
             training=True,
@@ -264,19 +266,19 @@ def main(args, resume_preempt=False):
 
         # -- update distributed-data-loader epoch
         unsupervised_sampler.set_epoch(epoch)
-
+  
         loss_meter = AverageMeter()
         maskA_meter = AverageMeter()
         maskB_meter = AverageMeter()
         time_meter = AverageMeter()
-
+   
         for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
+     
             def load_imgs():
-                # -- unsupervised imgs
-                imgs = udata.to(device, non_blocking=True)
+                x = udata.to(device, non_blocking=True)
                 masks_1 = [u.to(device, non_blocking=True) for u in masks_enc]
                 masks_2 = [u.to(device, non_blocking=True) for u in masks_pred]
-                return (imgs, masks_1, masks_2)
+                return (x, masks_1, masks_2)
             imgs, masks_enc, masks_pred = load_imgs()
             maskA_meter.update(len(masks_enc[0][0]))
             maskB_meter.update(len(masks_pred[0][0]))

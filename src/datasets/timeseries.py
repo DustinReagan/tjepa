@@ -23,6 +23,7 @@ logger = getLogger()
 
 def make_timeseries(
     transform,
+    sequence_length,
     batch_size,
     collator=None,
     pin_mem=True,
@@ -32,7 +33,7 @@ def make_timeseries(
     training=True,
     drop_last=True,
 ):
-    dataset = SinDataSet(training=training, transform=transform)
+    dataset = SinDataSet(training=training, transform=transform, sequence_length=sequence_length)
     logger.info('TimeSeries dataset created')
     dist_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset=dataset,
@@ -52,9 +53,9 @@ def make_timeseries(
     return dataset, data_loader, dist_sampler
 
 class SinDataSet(Dataset):
-    def __init__(self, num_samples=100000, sequence_length=448, num_channels=1, freq_range=(1, 1000), amp_range=(0.5, 100), random_state=None, transform: Optional[Callable] = None, training=True):
+    def __init__(self, num_samples=100000, sequence_length=448, num_channels=1, freq_range=(1, 100), amp_range=(0.5, 100), random_state=None, transform: Optional[Callable] = None, training=True):
         """
-        Initializes the dataset with parameters for generating sin curves, potentially across multiple channels.
+        Initializes the dataset with parameters for generating sin curves, potentially across multiple channels, and labels them with their frequency.
         :param num_samples: Number of samples in the dataset.
         :param sequence_length: Length of each time-series sequence.
         :param num_channels: Number of channels in each time-series data point.
@@ -82,14 +83,14 @@ class SinDataSet(Dataset):
 
     def __getitem__(self, idx):
         """
-        Generates a single sample of the dataset.
+        Generates a single sample of the dataset and its corresponding frequency label.
         """
         # Initialize an array to hold the data for all channels
         data = np.zeros((self.num_channels, self.sequence_length))
+        frequency = self.random_state.uniform(*self.freq_range)  # Same frequency for all channels in a sample
 
         # Generate sin curve data for each channel
         for channel in range(self.num_channels):
-            frequency = self.random_state.uniform(*self.freq_range)
             amplitude = self.random_state.uniform(*self.amp_range)
             sin_curve = amplitude * np.sin(frequency * self.time_steps)
             data[channel, :] = sin_curve
@@ -98,20 +99,32 @@ class SinDataSet(Dataset):
         data_tensor = torch.from_numpy(data).float()
 
         # Apply transforms if specified and in training mode
-        if self.transform is not None:
+        if self.transform is not None and self.training:
             data_tensor = self.transform(data_tensor)
 
-        return data_tensor
+        # Return the data tensor along with the frequency as the label
+        return data_tensor, torch.tensor(frequency/self.freq_range[1], dtype=torch.float)
 
 # Example usage
 if __name__ == "__main__":
-    dataset, unsupervised_loader, unsupervised_sampler = make_timeseries(transform=None, batch_size=32)
+    import matplotlib.pyplot as plt
+    dataset, unsupervised_loader, unsupervised_sampler = make_timeseries(transform=None, batch_size=32, sequence_length=448)
 
-    # Iterate over the DataLoader and process the data (e.g., visualize or feed into a model)
-    for i, batch in enumerate(unsupervised_loader):
-        print(f"Batch {i}, Shape: {batch.shape}")
-        # Add visualization or model feeding code here
-        # For simplicity, we're just printing the shape of each batch
-        if i == 1:  # Limit to printing information for two batches
-            break
-    print('done')
+    # Get a single batch from the DataLoader
+    for batch_data, frequencies in unsupervised_loader:
+        print(f"Batch Shape: {batch_data.shape}, Frequencies: {frequencies}")
+        plt.figure(figsize=(15, 10))  # Set the figure size for better visibility
+
+        # Assuming batch_data is shaped [batch_size, num_channels, sequence_length]
+        # and you want to plot all sequences in the batch
+        for i in range(batch_data.size(0)):
+            plt.subplot(5, 7, i+1)  # Change subplot grid dimensions as needed based on batch size
+            for channel in range(batch_data.size(1)):
+                plt.plot(batch_data[i, channel].numpy(), label=f'Channel {channel}')
+            plt.title(f'Frequency: {frequencies[i].item():.2f}')
+            plt.tight_layout()
+            plt.legend()
+
+        plt.show()
+
+        break  # Only plot the first batch

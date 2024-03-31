@@ -50,37 +50,48 @@ class MaskCollator(object):
         max_keep = int(self.length * mask_scale)
 
         # Calculate the block length based on the mask scale.
-        l = int(round(math.sqrt(max_keep)))
+        l = int(round(math.sqrt(max_keep)))#int(round(max_keep / 2))#int(round(math.sqrt(max_keep)))
         while l >= self.length:
             l -= 1
 
         return l
 
-    def _sample_block_mask(self, l, acceptable_regions=None):
-        # Attempt to sample a valid mask within the constraints.
+    def _sample_block_mask(self, length, acceptable_regions=None):
+        
+        def constrain_mask(mask, tries=0):
+            """ Helper to restrict given mask to a set of acceptable regions """
+            N = max(int(len(acceptable_regions)-tries), 0)
+            for k in range(N):
+                mask *= acceptable_regions[k]
+        # --
+        # -- Loop to sample masks until we find a valid one
         tries = 0
         timeout = og_timeout = 20
         valid_mask = False
         while not valid_mask:
-            # Sample a starting point for the mask within the length.
-            start = torch.randint(0, self.length - l, (1,))
-            mask = torch.zeros(self.length, dtype=torch.int32)
-            mask[start:start+l] = 1
+            # -- Sample block top-left corner
+            start = torch.randint(0, self.length - 1, (1,))
+            mask = torch.zeros((self.length), dtype=torch.int32)
+            mask[start:start+length] = 1
+            # -- Constrain mask to a set of acceptable regions
             if acceptable_regions is not None:
-                pass  # This is a placeholder for constraints on the mask.
+                constrain_mask(mask, tries)
             mask = torch.nonzero(mask.flatten())
-            valid_mask = len(mask) > self.min_keep
+            # -- If mask too small try again
+            valid_mask = len(mask) >= self.min_keep
             if not valid_mask:
+                
                 timeout -= 1
                 if timeout == 0:
                     tries += 1
                     timeout = og_timeout
-                    logger.warning(f'length: {self.length}')
                     logger.warning(f'Mask generator says: "Valid mask not found, decreasing acceptable-regions [{tries}]"')
         mask = mask.squeeze()
-        # Complement of the mask, marking the remaining unmasked parts.
-        mask_complement = torch.ones(self.length, dtype=torch.int32)
-        mask_complement[start:start+l] = 0
+        # --
+        mask_complement = torch.ones((self.length), dtype=torch.int32)
+        mask_complement[start:start+length] = 0
+        # --
+        #print('length: ', length, mask)
         return mask, mask_complement
 
     def __call__(self, batch):
@@ -88,7 +99,6 @@ class MaskCollator(object):
         This method is called when the MaskCollator object is used to process a batch of data.
         It generates masks for the encoder and predictor based on the initialized parameters.
         '''
-
         B = len(batch)  # Batch size.
 
         # Default collate function to process the batch data.
@@ -98,10 +108,15 @@ class MaskCollator(object):
         seed = self.step()
         g = torch.Generator()
         g.manual_seed(seed)
-        
+
         # Sample block sizes for predictor and encoder masks.
         p_size = self._sample_block_size(generator=g, scale=self.pred_mask_scale)
+        #print(f'p_size: {p_size}')
         e_size = self._sample_block_size(generator=g, scale=self.enc_mask_scale)
+        #print(  f'e_size: {e_size}')
+
+        #print(f'p_size: {p_size} e_size: {e_size}')
+        #logger.info(f'p_size: {p_size} e_size: {e_size}')
 
         collated_masks_pred, collated_masks_enc = [], []
         min_keep_pred = self.length
@@ -111,8 +126,12 @@ class MaskCollator(object):
             for _ in range(self.npred):
                 # Sample predictor masks.
                 mask, mask_C = self._sample_block_mask(p_size)
+                # if mask is 0d tensor, then expand it to 1d
+                if len(mask.shape) == 0:
+                    mask = mask.unsqueeze(0)
                 masks_p.append(mask)
                 masks_C.append(mask_C)
+                #print('predictor mask: ', mask)
                 min_keep_pred = min(min_keep_pred, len(mask))
             collated_masks_pred.append(masks_p)
 
@@ -127,7 +146,11 @@ class MaskCollator(object):
             for _ in range(self.nenc):
                 # Sample encoder masks with consideration of acceptable regions.
                 mask, _ = self._sample_block_mask(e_size, acceptable_regions=acceptable_regions)
+                # if mask is 0d tensor, then expand it to 1d
+                if len(mask.shape) == 0:
+                    mask = mask.unsqueeze(0)
                 masks_e.append(mask)
+                #print('encoder mask: ', mask)
                 min_keep_enc = min(min_keep_enc, len(mask))
             collated_masks_enc.append(masks_e)
 
